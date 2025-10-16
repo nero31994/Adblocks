@@ -29,56 +29,222 @@
 <body>
 <div id="loading">🔄 Loading player...</div>
 <script>
-(async () => {
-  const params = new URLSearchParams(location.search);
-  const url = params.get("url");
-  if (!url) {
-    document.body.innerHTML = "<h3 style='color:white;text-align:center;margin-top:40vh'>Missing ?url= parameter</h3>";
+/* --- Player modal anti-ad injector (drop-in) --- */
+(function(){
+  const playerModal = document.getElementById('playerModal');
+  const playerFrame = document.getElementById('playerFrame');
+  const playerClose = document.getElementById('playerClose');
+
+  if(!playerFrame) {
+    console.warn('PlayerFrame not found - injector not activated');
     return;
   }
 
-  try {
-    const resp = await fetch(url, { headers: { "User-Agent": navigator.userAgent } });
-    let html = await resp.text();
+  // helper: safe regex test
+  const looksLikeAd = str => {
+    if(!str) return false;
+    return /ads?|popunder|histats|sponsor|redirect|shoppe|shopee|click|promo|affiliat/i.test(str);
+  };
 
-    // 🧹 Strip ad / popup / histats scripts
-    html = html
-      .replace(/<script[^>]*src=["'][^"']*(histats|ads|sho|pop|click|atob)["'][^>]*><\/script>/gi, "")
-      .replace(/<script[^>]*>[\s\S]*?(popup|atob|sho|click|histats|window\.open).*?<\/script>/gi, "")
-      .replace(/on(click|load|beforeunload)=["'][^"']*["']/gi, "")
-      .replace(/href=["'][^"']*(ads|sho|click|redirect)[^"']*["']/gi, 'href="#"');
+  // Top-level protections (always active)
+  window.open = (() => {
+    const realOpen = window.open.bind(window);
+    return function(url, name, specs) {
+      if(looksLikeAd(url)) {
+        console.log('[AntiAd] Blocked popup open:', url);
+        return null;
+      }
+      return realOpen(url, name, specs);
+    };
+  })();
 
-    // 🪄 Neutralize window.open & redirect attempts
-    html = html.replace(/window\.open\s*\([^)]*\)/g, "console.log('Popup blocked')");
-    html = html.replace(/top\.location\s*=\s*[^;]+;/g, "");
+  // block suspicious top-level clicks (Shopee etc.)
+  document.addEventListener('click', function(e){
+    try {
+      const a = e.target.closest && e.target.closest('a, button');
+      if(!a) return;
+      const href = a.getAttribute('href') || '';
+      if(looksLikeAd(href) || /\/redirect|\/out\//i.test(href)) {
+        e.preventDefault(); e.stopPropagation();
+        a.removeAttribute('href');
+        a.blur && a.blur();
+        console.log('[AntiAd] Blocked click target', href);
+      }
+    } catch(err){/* ignore */}
+  }, true);
 
-    // 🔧 Inject player fullscreen fix
-    html = html.replace(
-      /<\/body>/i,
-      `<script>
-        window.open = ()=>null;
-        document.querySelectorAll('a').forEach(a=>a.removeAttribute('target'));
-        const fixPlayer=()=>{
-          const p=document.querySelector('iframe,video,#player,.player');
-          if(p)Object.assign(p.style,{width:'100vw',height:'100vh',position:'fixed',top:0,left:0,zIndex:9999});
-        };
-        new MutationObserver(fixPlayer).observe(document.body,{subtree:true,childList:true});
-        fixPlayer();
-      <\/script></body>`
-    );
+  // function to sanitize a Document: removes scripts/iframes/links that match patterns,
+  // neutralizes window.open and location changes inside the frame document
+  function sanitizeDocument(doc) {
+    try {
+      // remove matching scripts (inline or src)
+      const scripts = Array.from(doc.querySelectorAll('script'));
+      for(const s of scripts) {
+        const src = s.src || s.innerHTML || '';
+        if(/histats|popunder|adsbygoogle|doubleclick|atob|eval\(|sho?pee|affiliate|promo|redirect/i.test(src)) {
+          s.remove();
+        }
+      }
 
-    // 🖥️ Render cleaned HTML in iframe sandbox
-    const blob = new Blob([html], { type: "text/html" });
-    const frame = document.createElement("iframe");
-    frame.src = URL.createObjectURL(blob);
-    frame.sandbox = "allow-scripts allow-same-origin allow-forms allow-pointer-lock allow-popups-to-escape-sandbox";
-    frame.allowFullscreen = true;
-    document.body.innerHTML = "";
-    document.body.appendChild(frame);
-  } catch (e) {
-    document.body.innerHTML = "<h3 style='color:white;text-align:center;margin-top:40vh'>⚠️ Failed to load player: " + e.message + "</h3>";
+      // remove suspicious iframes
+      const iframes = Array.from(doc.querySelectorAll('iframe'));
+      for(const f of iframes) {
+        const src = f.src || '';
+        if(looksLikeAd(src) || src.startsWith('data:')) {
+          f.remove();
+        }
+      }
+
+      // neutralize inline event handlers that cause redirects
+      const all = Array.from(doc.querySelectorAll('[onload],[onclick],[onmousedown],[onmouseup],[onbeforeunload]'));
+      for(const el of all) {
+        el.removeAttribute('onclick');
+        el.removeAttribute('onmousedown');
+        el.removeAttribute('onmouseup');
+        el.removeAttribute('onload');
+        el.removeAttribute('onbeforeunload');
+      }
+
+      // neutralize window.open / location on the frame window if accessible
+      try {
+        if (doc.defaultView) {
+          doc.defaultView.open = function(){ console.log('[AntiAd] frame open blocked'); return null; };
+          Object.defineProperty(doc.defaultView, 'location', {
+            get: () => doc.defaultView.location,
+            set: () => { console.log('[AntiAd] frame location set blocked'); }
+          });
+        }
+      } catch(e){ /* ignore cross-origin */ }
+
+      // hide overlays / ad containers by attribute/class/id heuristics
+      const candidates = doc.querySelectorAll('[id*="ad"], [class*="ad"], [class*="overlay"], [id*="overlay"], [class*="popup"], [id*="popup"], [class*="sponsor"], [id*="sponsor"]');
+      for(const c of candidates) {
+        try {
+          c.style.setProperty('pointer-events','none','important');
+          c.style.setProperty('opacity','0','important');
+          c.style.setProperty('visibility','hidden','important');
+        } catch(e){}
+      }
+    } catch(err) {
+      console.warn('[AntiAd] sanitizeDocument failed', err);
+    }
   }
+
+  // attach a MutationObserver to a document (if accessible) to remove newly injected ads
+  function observeDocument(doc) {
+    try {
+      const observer = new doc.defaultView.MutationObserver(muts => {
+        for(const m of muts) {
+          for(const n of m.addedNodes || []) {
+            if(!(n instanceof Element)) continue;
+            try {
+              if(looksLikeAd(n.src || n.className || n.id || n.innerText)) {
+                n.remove();
+                console.log('[AntiAd] removed injected node');
+              } else {
+                // also sanitize subtree
+                sanitizeDocument(n.ownerDocument || doc);
+              }
+            } catch(e){}
+          }
+        }
+      });
+      observer.observe(doc.documentElement || doc.body, { childList:true, subtree:true });
+      // disconnect after 60s to avoid long-running observers (optionally remove this)
+      setTimeout(()=>observer.disconnect(), 60000);
+    } catch(e){
+      // may be cross-origin -> ignore
+    }
+  }
+
+  // When iframe loads, try to inject sanitizer (works if iframe is proxied / same-origin)
+  playerFrame.addEventListener('load', function onLoad(){
+    try {
+      const frameWin = playerFrame.contentWindow;
+      const frameDoc = playerFrame.contentDocument || frameWin.document;
+
+      // If we can access the iframe DOM, sanitize immediately and observe
+      if(frameDoc && frameDoc.body) {
+        sanitizeDocument(frameDoc);
+        observeDocument(frameDoc);
+        console.log('[AntiAd] injected into iframe');
+        return;
+      }
+    } catch(e){
+      // cross-origin protection
+    }
+
+    // fallback: the iframe is cross-origin -> we cannot modify its internals.
+    // Apply strong top-level protections instead (already active), and also apply a lightweight overlay remover
+    setTimeout(() => {
+      try {
+        // try a second time later in case proxy rewrites to same-origin
+        const frameWin = playerFrame.contentWindow;
+        const frameDoc = playerFrame.contentDocument || (frameWin && frameWin.document);
+        if(frameDoc && frameDoc.body) {
+          sanitizeDocument(frameDoc);
+          observeDocument(frameDoc);
+          console.log('[AntiAd] late injected into iframe after retry');
+          return;
+        }
+      } catch(e){}
+      // if still cross-origin, create an invisible shield on top of iframe to prevent clicks from reaching ad overlays
+      const shieldId = '__nxb_ad_shield__';
+      if(!document.getElementById(shieldId)) {
+        const shield = document.createElement('div');
+        shield.id = shieldId;
+        Object.assign(shield.style, {
+          position: 'fixed',
+          inset: '0',
+          zIndex: 9998,
+          pointerEvents: 'auto', // capture clicks
+          background: 'transparent'
+        });
+        // allow click to pass to controls area only (if you need)
+        shield.addEventListener('click', (ev)=> {
+          // allow clicks if they are inside the center (player controls) area - adjust as needed
+          const rect = playerFrame.getBoundingClientRect();
+          const cx = ev.clientX, cy = ev.clientY;
+          // allow center 70% area to accept clicks, block edges where overlays usually sit
+          const left = rect.left + rect.width*0.15, right = rect.right - rect.width*0.15;
+          const top = rect.top + rect.height*0.15, bottom = rect.bottom - rect.height*0.15;
+          if(cx >= left && cx <= right && cy >= top && cy <= bottom) {
+            // allow click to fall through: temporarily remove shield
+            shield.style.pointerEvents = 'none';
+            setTimeout(()=>{ shield.style.pointerEvents = 'auto'; }, 600); // re-enable after short delay
+          } else {
+            ev.preventDefault(); ev.stopPropagation();
+            console.log('[AntiAd] blocked outside-player click');
+          }
+        }, true);
+        document.body.appendChild(shield);
+      }
+      console.log('[AntiAd] iframe cross-origin fallback active (click-shield placed)');
+    }, 400); // small delay to let frame finish loading
+  });
+
+  // Hook into your modal-open logic: if you call openPlayerAutoplay(url) set src there,
+  // we also remove the shield when modal closes.
+  playerClose && playerClose.addEventListener('click', ()=> {
+    // small cleanup on close
+    try {
+      playerFrame.src = ''; // stop playback and unload iframe
+    } catch(e){}
+    const s = document.getElementById('__nxb_ad_shield__');
+    if(s) s.remove();
+  });
+
+  // Also remove shield when modal clicked outside iframe to close
+  playerModal && playerModal.addEventListener('click', (e)=>{
+    if(e.target === playerModal) {
+      const s = document.getElementById('__nxb_ad_shield__');
+      if(s) s.remove();
+    }
+  });
+
+  // Extra: if you use a proxy (recommended), make sure the iframe uses it so we can inject fully:
+  // e.g. https://vidsrcprxy.vercel.app/api/proxy/embed/movie/385687
 })();
-</script>
+          </script>
 </body>
 </html>
