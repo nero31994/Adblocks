@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Ad-Free Vidsrc Player</title>
+<style>
+  html,body {
+    margin: 0; padding: 0;
+    background: #000;
+    overflow: hidden;
+    width: 100vw; height: 100vh;
+  }
+  iframe, video, #player, .player {
+    width: 100vw !important;
+    height: 100vh !important;
+    border: none !important;
+    display: block !important;
+  }
+  #loading {
+    color: #0f0;
+    font-family: monospace;
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+  }
+</style>
+</head>
+<body>
+<div id="loading">🔄 Loading player...</div>
+<script>
+(async () => {
+  const params = new URLSearchParams(location.search);
+  const url = params.get("url");
+  if (!url) {
+    document.body.innerHTML = "<h3 style='color:white;text-align:center;margin-top:40vh'>Missing ?url= parameter</h3>";
+    return;
+  }
+
+  try {
+    const resp = await fetch(url, { headers: { "User-Agent": navigator.userAgent } });
+    let html = await resp.text();
+
+    // 🧹 Strip ad / popup / histats scripts
+    html = html
+      .replace(/<script[^>]*src=["'][^"']*(histats|ads|sho|pop|click|atob)["'][^>]*><\/script>/gi, "")
+      .replace(/<script[^>]*>[\s\S]*?(popup|atob|sho|click|histats|window\.open).*?<\/script>/gi, "")
+      .replace(/on(click|load|beforeunload)=["'][^"']*["']/gi, "")
+      .replace(/href=["'][^"']*(ads|sho|click|redirect)[^"']*["']/gi, 'href="#"');
+
+    // 🪄 Neutralize window.open & redirect attempts
+    html = html.replace(/window\.open\s*\([^)]*\)/g, "console.log('Popup blocked')");
+    html = html.replace(/top\.location\s*=\s*[^;]+;/g, "");
+
+    // 🔧 Inject player fullscreen fix
+    html = html.replace(
+      /<\/body>/i,
+      `<script>
+        window.open = ()=>null;
+        document.querySelectorAll('a').forEach(a=>a.removeAttribute('target'));
+        const fixPlayer=()=>{
+          const p=document.querySelector('iframe,video,#player,.player');
+          if(p)Object.assign(p.style,{width:'100vw',height:'100vh',position:'fixed',top:0,left:0,zIndex:9999});
+        };
+        new MutationObserver(fixPlayer).observe(document.body,{subtree:true,childList:true});
+        fixPlayer();
+      <\/script></body>`
+    );
+
+    // 🖥️ Render cleaned HTML in iframe sandbox
+    const blob = new Blob([html], { type: "text/html" });
+    const frame = document.createElement("iframe");
+    frame.src = URL.createObjectURL(blob);
+    frame.sandbox = "allow-scripts allow-same-origin allow-forms allow-pointer-lock allow-popups-to-escape-sandbox";
+    frame.allowFullscreen = true;
+    document.body.innerHTML = "";
+    document.body.appendChild(frame);
+  } catch (e) {
+    document.body.innerHTML = "<h3 style='color:white;text-align:center;margin-top:40vh'>⚠️ Failed to load player: " + e.message + "</h3>";
+  }
+})();
+</script>
+</body>
+</html>
